@@ -1,0 +1,47 @@
+[
+{
+  "directory": "/home/summer/RL/RoboCup/robocup_locator_v1.1/build",
+  "command": "/usr/bin/c++  -I/home/summer/RL/RoboCup/robocup_locator_v1.1/include -isystem /usr/local/include/opencv4 -isystem /usr/local/include/ddscxx -isystem /usr/local/include/eigen3  -o CMakeFiles/test_location.dir/src/DetectionModule.cpp.o -c /home/summer/RL/RoboCup/robocup_locator_v1.1/src/DetectionModule.cpp",
+  "file": "/home/summer/RL/RoboCup/robocup_locator_v1.1/src/DetectionModule.cpp"
+},
+{
+  "directory": "/home/summer/RL/RoboCup/robocup_locator_v1.1/build",
+  "command": "/usr/bin/c++  -I/home/summer/RL/RoboCup/robocup_locator_v1.1/include -isystem /usr/local/include/opencv4 -isystem /usr/local/include/ddscxx -isystem /usr/local/include/eigen3  -o CMakeFiles/test_location.dir/src/LocationModule.cpp.o -c /home/summer/RL/RoboCup/robocup_locator_v1.1/src/LocationModule.cpp",
+  "file": "/home/summer/RL/RoboCup/robocup_locator_v1.1/src/LocationModule.cpp"
+},
+{
+  "directory": "/home/summer/RL/RoboCup/robocup_locator_v1.1/build",
+  "command": "/usr/bin/c++  -I/home/summer/RL/RoboCup/robocup_locator_v1.1/include -isystem /usr/local/include/opencv4 -isystem /usr/local/include/ddscxx -isystem /usr/local/include/eigen3  -o CMakeFiles/test_location.dir/src/Locator.cpp.o -c /home/summer/RL/RoboCup/robocup_locator_v1.1/src/Locator.cpp",
+  "file": "/home/summer/RL/RoboCup/robocup_locator_v1.1/src/Locator.cpp"
+},
+{
+  "directory": "/home/summer/RL/RoboCup/robocup_locator_v1.1/build",
+  "command": "/usr/bin/c++  -I/home/summer/RL/RoboCup/robocup_locator_v1.1/include -isystem /usr/local/include/opencv4 -isystem /usr/local/include/ddscxx -isystem /usr/local/include/eigen3  -o CMakeFiles/test_location.dir/src/ParticleFilter.cpp.o -c /home/summer/RL/RoboCup/robocup_locator_v1.1/src/ParticleFilter.cpp",
+  "file": "/home/summer/RL/RoboCup/robocup_locator_v1.1/src/ParticleFilter.cpp"
+},
+{
+  "directory": "/home/summer/RL/RoboCup/robocup_locator_v1.1/build",
+  "command": "/usr/bin/c++  -I/home/summer/RL/RoboCup/robocup_locator_v1.1/include -isystem /usr/local/include/opencv4 -isystem /usr/local/include/ddscxx -isystem /usr/local/include/eigen3  -o CMakeFiles/test_location.dir/src/display.cpp.o -c /home/summer/RL/RoboCup/robocup_locator_v1.1/src/display.cpp",
+  "file": "/home/summer/RL/RoboCup/robocup_locator_v1.1/src/display.cpp"
+},
+{
+  "directory": "/home/summer/RL/RoboCup/robocup_locator_v1.1/build",
+  "command": "/usr/bin/c++  -I/home/summer/RL/RoboCup/robocup_locator_v1.1/include -isystem /usr/local/include/opencv4 -isystem /usr/local/include/ddscxx -isystem /usr/local/include/eigen3  -o CMakeFiles/test_location.dir/src/pose.cpp.o -c /home/summer/RL/RoboCup/robocup_locator_v1.1/src/pose.cpp",
+  "file": "/home/summer/RL/RoboCup/robocup_locator_v1.1/src/pose.cpp"
+},
+{
+  "directory": "/home/summer/RL/RoboCup/robocup_locator_v1.1/build",
+  "command": "/usr/bin/c++  -I/home/summer/RL/RoboCup/robocup_locator_v1.1/include -isystem /usr/local/include/opencv4 -isystem /usr/local/include/ddscxx -isystem /usr/local/include/eigen3  -o CMakeFiles/test_location.dir/test_location.cpp.o -c /home/summer/RL/RoboCup/robocup_locator_v1.1/test_location.cpp",
+  "file": "/home/summer/RL/RoboCup/robocup_locator_v1.1/test_location.cpp"
+},
+{
+  "directory": "/home/summer/RL/RoboCup/robocup_locator_v1.1/build",
+  "command": "/usr/bin/c++  -I/usr/local/include/opencv4 -I/home/summer/RL/RoboCup/robocup_locator_v1.1/include -isystem /usr/local/include/ddscxx  -o CMakeFiles/test_subscribe_location.dir/src/LocationModule.cpp.o -c /home/summer/RL/RoboCup/robocup_locator_v1.1/src/LocationModule.cpp",
+  "file": "/home/summer/RL/RoboCup/robocup_locator_v1.1/src/LocationModule.cpp"
+},
+{
+  "directory": "/home/summer/RL/RoboCup/robocup_locator_v1.1/build",
+  "command": "/usr/bin/c++  -I/usr/local/include/opencv4 -I/home/summer/RL/RoboCup/robocup_locator_v1.1/include -isystem /usr/local/include/ddscxx  -o CMakeFiles/test_subscribe_location.dir/test_subscribe_location.cpp.o -c /home/summer/RL/RoboCup/robocup_locator_v1.1/test_subscribe_location.cpp",
+  "file": "/home/summer/RL/RoboCup/robocup_locator_v1.1/test_subscribe_location.cpp"
+}
+]
