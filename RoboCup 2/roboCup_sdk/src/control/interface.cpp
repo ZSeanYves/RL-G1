@@ -28,7 +28,7 @@ void Interface::init()
 
     audioClient = unitree::robot::g1::AudioClient();
     audioClient.Init();
-    // 
+    // 原来是 10.0f
     audioClient.SetTimeout(0.2f);
 
     servoCmd = std::make_unique<unitree::robot::RealTimePublisher<unitree_go::msg::dds_::MotorCmds_>>("rt/g1_comp_servo/cmd");
@@ -58,7 +58,7 @@ void Interface::init()
 
 void Interface::lowStateHandle()
 {
-    
+    // 机器人->场地的齐次变换
     homoMatPelvisToField = homoMatrix(
         rotMat2D(locateResult->msg_.robot2field_theta()),
         Vec2<double>(locateResult->msg_.robot2field_x(), locateResult->msg_.robot2field_y())
@@ -87,7 +87,7 @@ void Interface::lowStateHandle()
     rotMatPelvisToGlobal = quatToRotMat(quat);
     debug_rpy = rotMatToRPY(rotMatPelvisToGlobal);
 
-    // 目标检测 → 计算球在场地坐标（保留你的原逻辑）
+    // 目标检测 → 计算球在场地坐标
     if (!detection->msg_.results().empty())
     {
         for (const auto& result : detection->msg_.results())
@@ -117,67 +117,49 @@ void Interface::lowStateHandle()
         ballDetected = false;
     }
 
-    // ================= 机体+足球 越界去抖  =================
-    const double FIELD_X = 4.5;      // 9m/2
-    const double FIELD_Y = 3.0;      // 6m/2
-    const double SAFE_MARGIN = 0.20; // 回到内场后再多 0.2m 才解锁
-    const int    OOB_HYST   = 10;    // 连续 10 帧才算越界（~20ms@500Hz）
+    // ================= 球越界去抖 + 自动解锁 =================
+    const double FIELD_X = 4.5;     // 9m/2
+    const double FIELD_Y = 3.0;     // 6m/2
+    const double SAFE_MARGIN = 0.20;
+    const int    OOB_HYST   = 10;
 
-    // —— 机体越界状态
-    static int  robot_oob_cnt = 0;   // 去抖计数器
-    static bool halted        = false;  // 机体导致的暂停
+    static int  ball_oob_cnt = 0;
+    static bool halted = false;
 
-    // —— 足球越界状态
-    static int  ball_oob_cnt  = 0;   // 球去抖计数器
-    static bool ball_halted   = false;  // 球导致的暂停
+    // 使用球在“场地坐标系”的位置来判边
+    const double bx = ballPositionInField(0);
+    const double by = ballPositionInField(1);
 
-    // 机器人在场地坐标系下的位置（平移分量）
-    const double rx = homoMatPelvisToField(0, 2);
-    const double ry = homoMatPelvisToField(1, 2);
-
-    // --- 机体越界去抖 ---
-    const bool robot_oob_raw = (std::fabs(rx) > FIELD_X) || (std::fabs(ry) > FIELD_Y);
-    robot_oob_cnt = robot_oob_raw ? std::min(robot_oob_cnt + 1, OOB_HYST)
-                                : std::max(robot_oob_cnt - 1, 0);
-    const bool robot_oob = (robot_oob_cnt >= OOB_HYST);
-
-    if (robot_oob) {
-        halted = true;
-        pause_signal = true; 
-    } else if (halted) {
-        const bool inside_safe = (std::fabs(rx) < FIELD_X - SAFE_MARGIN) &&
-                                (std::fabs(ry) < FIELD_Y - SAFE_MARGIN);
-        if (inside_safe) {
-            halted = false;
-            pause_signal = false;  
-        }
-    }
-
-    // --- 足球越界去抖 ---
+    // 只有在“当前确实检测到球”时才判边；丢球时去抖计数自然回落
     bool ball_oob_raw = false;
     if (ballDetected) {
-        ball_oob_raw = (std::fabs(ballPositionInField(0)) > FIELD_X) ||
-                    (std::fabs(ballPositionInField(1)) > FIELD_Y);
-        ball_oob_cnt = ball_oob_raw ? std::min(ball_oob_cnt + 1, OOB_HYST)
-                                    : std::max(ball_oob_cnt - 1, 0);
+        ball_oob_raw = (std::fabs(bx) > FIELD_X) || (std::fabs(by) > FIELD_Y);
     } else {
-        // 球丢失时，计数自然回落，避免卡在“球越界”状态
         ball_oob_cnt = std::max(ball_oob_cnt - 1, 0);
     }
+
+    // 去抖计数：raw 真则 +1，raw 假则 -1，夹在 [0, OOB_HYST]
+    ball_oob_cnt = ball_oob_raw
+                 ? std::min(ball_oob_cnt + 1, OOB_HYST)
+                 : std::max(ball_oob_cnt - 1, 0);
+
     const bool ball_oob = (ball_oob_cnt >= OOB_HYST);
 
     if (ball_oob) {
-        ball_halted = true;
+        halted = true;
         pause_signal = true;
-    } else if (ball_halted && ballDetected) {
-        const bool ball_inside_safe =
-            (std::fabs(ballPositionInField(0)) < FIELD_X - SAFE_MARGIN) &&
-            (std::fabs(ballPositionInField(1)) < FIELD_Y - SAFE_MARGIN);
-        if (ball_inside_safe) {
-            ball_halted = false;
-            pause_signal = false;
+    } else if (halted) {
+        // 球回到场内并留一定余量才自动解锁
+        const bool inside_safe = ballDetected &&
+            (std::fabs(bx) < FIELD_X - SAFE_MARGIN) &&
+            (std::fabs(by) < FIELD_Y - SAFE_MARGIN);
+        if (inside_safe) {
+            halted = false;
+            pause_signal = false;  // 自动解锁
         }
     }
+    // =============================================================
+
 }
 
 void Interface::compute_ball_position(
