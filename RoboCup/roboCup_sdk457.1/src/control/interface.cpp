@@ -120,7 +120,7 @@ void Interface::lowStateHandle()
     // ================= 球越界去抖 + 自动解锁 =================
     const double FIELD_X = 4.5;     // 9m/2
     const double FIELD_Y = 3.0;     // 6m/2
-    const double SAFE_MARGIN = 0.05;
+    const double SAFE_MARGIN = 0.1;
     const int    OOB_HYST   = 10;
 
     static int  ball_oob_cnt = 0;
@@ -151,8 +151,8 @@ void Interface::lowStateHandle()
     } else if (halted) {
         // 球回到场内并留一定余量才自动解锁
         const bool inside_safe = ballDetected &&
-            (std::fabs(bx) < FIELD_X - SAFE_MARGIN) &&
-            (std::fabs(by) < FIELD_Y - SAFE_MARGIN);
+            (std::fabs(bx) < FIELD_X + SAFE_MARGIN) &&
+            (std::fabs(by) < FIELD_Y + SAFE_MARGIN);
         if (inside_safe) {
             halted = false;
             pause_signal = false;  // 自动解锁

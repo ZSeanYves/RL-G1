@@ -33,123 +33,191 @@ BT::NodeStatus camToPosition::tick()
 BT::NodeStatus camFindBall::tick()
 {
     using Clock = std::chrono::steady_clock;
-    // —— 可调参数（角度单位：度 / 角速度单位：弧度每秒）——
-    constexpr float YAW_MIN = -50.0f, YAW_MAX = 50.0f;     // 舵机限位（与你的 config 相符）
-    constexpr float PIT_MIN = -20.0f, PIT_MAX = 85.0f;
-    constexpr float LOCAL_A0_Y = 10.0f, LOCAL_A0_P = 8.0f; // 刚丢球时的局部扫幅
-    constexpr float LOCAL_GROW_Y = 25.0f, LOCAL_GROW_P = 16.0f; // 扫幅增长率（°/s）
-    constexpr float GLOBAL_MAX_Y = 45.0f, GLOBAL_MAX_P = 25.0f; // 全局最大扫幅
-    constexpr float OMEGA = 1.6f;           // 基本扫描角频（rad/s）
-    constexpr float FREQ_RATIO = 1.7f;      // 纵向频率比，非整数避免重复轨迹
-    constexpr float PHASE_DRIFT = 0.6f;     // 相位漂移速度（rad/s），填补死角
-    constexpr float RECENT_LOST_T = 1.0f;   // 丢球 1s 内按“局部搜索”，之后全局
-    constexpr float BASE_VYAW = 0.25f;      // 底盘配合转的最大角速度（rad/s）
-    constexpr float BASE_HELP_EDGE = 40.0f; // 相机 yaw 超过此角度时带动底盘
-    constexpr int   SEEN_OK = 2, LOST_OK = 5; // 去抖阈值（连续帧）
 
-    // —— 跨 tick 的状态 ——（函数静态局部，避免改头文件）
+    // —— 舵机限位（度）——
+    constexpr float YAW_MIN = -50.0f, YAW_MAX = 50.0f;
+    constexpr float PIT_MIN = -20.0f, PIT_MAX = 85.0f;
+
+    // —— 扫描参数 —— 
+    constexpr float OMEGA = 1.6f;          // 基本角频（rad/s）
+    constexpr float FREQ_RATIO = 1.7f;     // 纵向频率比
+    constexpr float PHASE_DRIFT = 0.6f;    // 相位漂移（rad/s）
+    constexpr float GLOBAL_MAX_Y = 45.0f;  // 全局横向幅度（度）
+    constexpr float GLOBAL_MAX_P = 25.0f;  // 全局俯仰幅度（度）
+    constexpr float LOCAL_A0_Y   = 10.0f;  // 局部初始横向幅度（度）
+    constexpr float LOCAL_A0_P   = 8.0f;   // 局部初始俯仰幅度（度）
+    constexpr float LOCAL_GROW_Y = 25.0f;  // 局部幅度增长速率（°/s）
+    constexpr float LOCAL_GROW_P = 16.0f;  // 局部幅度增长速率（°/s）
+    constexpr float RECENT_LOST_T = 1.0f;  // 1s 内按“局部搜索”
+
+    // —— 去抖 —— 
+    constexpr int   SEEN_OK = 2, LOST_OK = 5;
+
+    // —— 果断转身触发条件 —— 
+    constexpr float EDGE_TRIG = 38.0f;      // 上一帧 yaw 接近边缘则触发
+    constexpr float LOST_EDGE_WINDOW = 0.6f;// 丢失在 0.6s 内视为“突然消失到身后”
+
+    // —— 底盘联动 —— 
+    constexpr float BASE_HELP_EDGE = 40.0f; // 普通扫描时接近边缘才带动底盘
+    constexpr float BASE_VYAW = 0.25f;      // 普通扫描底盘角速度（rad/s）
+
+    // —— 转身/环扫 —— 
+    constexpr float BODY_TURN_ANGLE = float(M_PI); // 约 180°
+    constexpr float BODY_TURN_SPEED = 0.55f;       // rad/s
+    constexpr float BODY_TURN_MAX_T = 2.8f;        // 保险超时（s）
+    constexpr float SWEEP_OMEGA     = 0.35f;       // 环扫角速度（rad/s）
+    constexpr float SWEEP_ENTER_T   = 2.0f;        // 丢失超过 2s 进入环扫
+
+    // —— 状态保持（静态局部）——
+    enum class Mode { LocalScan, GlobalScan, BodyTurn, BaseSweep };
     static bool inited = false;
-    static float yaw_center = 0.0f, pit_center = 0.0f; // 搜索中心（刚丢球时的角度）
-    static float yaw_last = 0.0f, pit_last = 0.0f;     // 记录当前输出，用于平滑
-    static float phi = 0.0f;                            // Lissajous 相位
+    static Mode mode = Mode::LocalScan;
+
+    static float yaw_center = 0.0f, pit_center = -5.0f; // 搜索中心
+    static float yaw_last   = 0.0f, pit_last   = 0.0f;  // 上次下发角
+    static float last_seen_yaw = 0.0f;                  // 上次“稳定看到球”时的 yaw
+    static float phi = 0.0f, t = 0.0f;                  // 扫描相位
+
     static int seen_cnt = 0, lost_cnt = 0;
-    static Clock::time_point t0 = Clock::now(), last = Clock::now();
-    static Clock::time_point last_seen_tp = Clock::now();
-    if (!inited) { // 第一次进入时初始化
+
+    static Clock::time_point tp_last = Clock::now();
+    static Clock::time_point tp_seen_stable = Clock::now();
+
+    // —— 转身控制 —— 
+    static int   turn_dir = 0;                          // -1 左、+1 右
+    static float turn_remain = 0.0f;                    // 剩余转角（rad）
+    static Clock::time_point tp_turn_start;
+
+    // —— 环扫控制 —— 
+    static int sweep_dir = +1;                          // 环扫方向，每次进入切换
+
+    // —— 初始化 —— 
+    if (!inited) {
         yaw_center = _interface->servoState->msg_.states()[0].q();
         pit_center = _interface->servoState->msg_.states()[1].q();
-        yaw_last = yaw_center; 
-        pit_last = pit_center;
-        t0 = last = last_seen_tp = Clock::now();
+        yaw_last = yaw_center; pit_last = pit_center;
+        tp_last = tp_seen_stable = Clock::now();
         inited = true;
     }
 
-    // —— 检测去抖 —— 
+    // —— ballDetected 去抖更新 —— 
     if (_interface->ballDetected) {
         seen_cnt++; lost_cnt = 0;
-        last_seen_tp = Clock::now();
     } else {
         lost_cnt++; seen_cnt = 0;
     }
-    const bool ball_stable_seen = (seen_cnt >= SEEN_OK);
-    const bool ball_stable_lost = (lost_cnt >= LOST_OK);
+    bool ball_stable_seen = (seen_cnt >= SEEN_OK);
+    bool ball_stable_lost = (lost_cnt >= LOST_OK);
 
+    auto now = Clock::now();
+    float dt = std::chrono::duration<float>(now - tp_last).count();
+    dt = std::clamp(dt, 0.0f, 0.05f);
+    tp_last = now;
+
+    float yaw_now = _interface->servoState->msg_.states()[0].q();
+    float pit_now = _interface->servoState->msg_.states()[1].q();
+
+    // —— 看到了球：复位搜索器 —— 
     if (ball_stable_seen) {
-        // 看到球：重置搜索器，直接成功返回
-        //（让下一次“丢球”从当前角度开始局部搜索）
-        yaw_center = _interface->servoState->msg_.states()[0].q();
-        pit_center = _interface->servoState->msg_.states()[1].q();
-        yaw_last = yaw_center;
-        pit_last = pit_center;
-        phi = 0.0f;
-        _interface->locoClient.Move(0, 0, 0); // 看到球就不再空转底盘
+        last_seen_yaw = yaw_now;
+        yaw_center = yaw_now; pit_center = pit_now;
+        yaw_last = yaw_now;   pit_last = pit_now;
+        phi = 0.0f; t = 0.0f;
+        mode = Mode::LocalScan;
+        _interface->locoClient.Move(0, 0, 0);
+        tp_seen_stable = now;
         return BT::NodeStatus::SUCCESS;
     }
 
-    // —— 时间步长 —— 
-    Clock::time_point now = Clock::now();
-    float dt = std::chrono::duration<float>(now - last).count();
-    dt = std::clamp(dt, 0.0f, 0.05f); // 防止异常大步长
-    last = now;
+    // —— 丢球时间 —— 
+    float since_seen = std::chrono::duration<float>(now - tp_seen_stable).count();
 
-    // —— 选用局部/全局搜索策略 —— 
-    float since_lost = std::chrono::duration<float>(now - last_seen_tp).count();
-    float Ay, Ap;        // 扫描幅度（度）
-    float yc, pc;        // 中心
-    if (since_lost < RECENT_LOST_T) {
-        // 局部螺旋：围绕最后看见的位置逐步放大
-        float g = std::clamp(since_lost / RECENT_LOST_T, 0.0f, 1.0f);
-        Ay = std::min(LOCAL_A0_Y + LOCAL_GROW_Y * since_lost, GLOBAL_MAX_Y);
-        Ap = std::min(LOCAL_A0_P + LOCAL_GROW_P * since_lost, GLOBAL_MAX_P);
-        yc = yaw_center; pc = pit_center;
-    } else {
-        // 全局 Lissajous：横向大扫，纵向不同频率 + 相位漂移，覆盖无死角
-        Ay = GLOBAL_MAX_Y;
-        Ap = GLOBAL_MAX_P;
-        yc = 0.0f;       // 回到全局中心（可改成偏下略俯视：如 -5 度）
-        pc = -5.0f;
+    // —— 突然丢失且上一帧接近边缘：触发“果断转身” —— 
+    if (since_seen < LOST_EDGE_WINDOW && std::fabs(last_seen_yaw) > EDGE_TRIG && mode != Mode::BodyTurn) {
+        mode = Mode::BodyTurn;
+        turn_dir = (last_seen_yaw > 0.0f) ? +1 : -1;
+        turn_remain = BODY_TURN_ANGLE;
+        tp_turn_start = now;
+        // 进入转身时把镜头拉回中区小幅搜索，防止盯在边角
+        yaw_center = 0.0f; pit_center = -5.0f;
+        phi = 0.0f; t = 0.0f;
     }
 
-    // —— 生成目标角：Lissajous + 速度成形（sin^3 提升中区速度感）——
-    static float t = 0.0f;
-    t += OMEGA * dt;
-    phi += PHASE_DRIFT * dt;
+    // —— 丢失较久，进入环扫 —— 
+    if (mode != Mode::BodyTurn && since_seen > SWEEP_ENTER_T) {
+        // 每次进入切方向，避免原地来回
+        sweep_dir = (sweep_dir == +1) ? -1 : +1;
+        mode = Mode::BaseSweep;
+    }
+
+    // —— 生成镜头目标角 —— 
+    float Ay = 0.0f, Ap = 0.0f, yc = 0.0f, pc = 0.0f;
+    if (mode == Mode::BodyTurn) {
+        // 转身时镜头做小范围探测
+        Ay = 12.0f; Ap = 10.0f; yc = 0.0f; pc = -5.0f;
+    } else {
+        if (since_seen < RECENT_LOST_T) {
+            // 局部放大扫描
+            Ay = std::min(LOCAL_A0_Y + LOCAL_GROW_Y * since_seen, GLOBAL_MAX_Y);
+            Ap = std::min(LOCAL_A0_P + LOCAL_GROW_P * since_seen, GLOBAL_MAX_P);
+            yc = yaw_center; pc = pit_center;
+            mode = Mode::LocalScan;
+        } else {
+            // 全局 Lissajous
+            Ay = GLOBAL_MAX_Y; Ap = GLOBAL_MAX_P;
+            yc = 0.0f; pc = -5.0f;
+            if (mode != Mode::BaseSweep) mode = Mode::GlobalScan;
+        }
+    }
 
     auto sin3 = [](float x){ float s = std::sin(x); return s*s*s; };
+    t   += OMEGA * dt;
+    phi += PHASE_DRIFT * dt;
 
     float yaw_cmd = yc + Ay * sin3(t);
     float pit_cmd = pc + Ap * std::sin(FREQ_RATIO * t + phi);
 
-    // —— 限幅 & 平滑 —— 
+    // —— 限幅与单步平滑 —— 
+    constexpr float MAX_STEP = 6.0f;
     yaw_cmd = std::clamp(yaw_cmd, YAW_MIN, YAW_MAX);
     pit_cmd = std::clamp(pit_cmd, PIT_MIN, PIT_MAX);
-
-    // 给一点一阶平滑，避免抖：限制单步最大变化（°/tick）
-    const float MAX_STEP = 6.0f; // 每 tick 最多改 6°
     float dy = std::clamp(yaw_cmd - yaw_last, -MAX_STEP, MAX_STEP);
     float dp = std::clamp(pit_cmd - pit_last, -MAX_STEP, MAX_STEP);
-    yaw_last += dy;
-    pit_last += dp;
+    yaw_last += dy; pit_last += dp;
 
-    // —— 下发相机舵机 —— 
+    // —— 下发舵机 —— 
     _interface->servoCmd->msg_.cmds()[0].mode() = 1;
     _interface->servoCmd->msg_.cmds()[0].q()    = yaw_last;
     _interface->servoCmd->msg_.cmds()[1].mode() = 1;
     _interface->servoCmd->msg_.cmds()[1].q()    = pit_last;
     _interface->servoCmd->unlockAndPublish();
 
-    // —— 底盘配合：只有当相机 yaw 接近边缘时才轻微带动底盘 —— 
+    // —— 底盘角速度策略 —— 
     float vyaw = 0.0f;
-    if (std::fabs(yaw_last) > BASE_HELP_EDGE) {
-        vyaw = BASE_VYAW * ((yaw_last > 0) ? 1.0f : -1.0f);
+
+    if (mode == Mode::BodyTurn) {
+        // 果断转身：按方向旋转，累计角度
+        vyaw = turn_dir * BODY_TURN_SPEED;
+        turn_remain -= std::fabs(vyaw) * dt;
+        bool timeout = std::chrono::duration<float>(now - tp_turn_start).count() > BODY_TURN_MAX_T;
+        if (turn_remain <= 0.0f || timeout) {
+            mode = Mode::GlobalScan; // 转完回全局扫
+        }
+    } else if (mode == Mode::BaseSweep) {
+        // 环扫：持续慢速自转 + 头部 Lissajous
+        vyaw = sweep_dir * SWEEP_OMEGA;
+    } else {
+        // 普通扫描：接近边缘才轻微带动底盘
+        if (std::fabs(yaw_last) > BASE_HELP_EDGE && ball_stable_lost) {
+            vyaw = (yaw_last > 0.0f ? +BASE_VYAW : -BASE_VYAW);
+        }
     }
-    // 如果还处在“刚丢球且未去抖稳定”，就暂不转底盘，避免和别的节点打架
-    if (!ball_stable_lost) vyaw = 0.0f;
 
     _interface->locoClient.Move(0.0, 0.0, vyaw);
 
     return BT::NodeStatus::SUCCESS;
 }
+
 
 
 BT::NodeStatus robotTrackPelvis::tick()
