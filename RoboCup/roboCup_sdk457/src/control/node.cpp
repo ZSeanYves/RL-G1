@@ -32,19 +32,75 @@ BT::NodeStatus camToPosition::tick()
 
 BT::NodeStatus camFindBall::tick()
 {
+    using Clock = std::chrono::steady_clock;
+
+    // —— 可调参数（结合你现有限位：yaw ±50°, pitch [-20°,85°]）——
+    constexpr float YAW_MIN = -50.0f, YAW_MAX = 50.0f;
+    constexpr float PIT_MIN = -20.0f, PIT_MAX = 85.0f;
+
+    // 去抖
+    constexpr int   SEEN_OK = 2, LOST_OK = 5;
+
+    // “突然到身后”判定与动作
+    constexpr float EDGE_TRIG = 38.0f;       // 上次看到时 yaw 靠边
+    constexpr float LOST_EDGE_WINDOW = 0.6f; // 丢失 < 0.6s 视为“突丢”
+    constexpr float BODY_TURN_ANGLE = float(M_PI); // 约 180°
+    constexpr float BODY_TURN_SPEED = 0.55f;       // rad/s
+    constexpr float BODY_TURN_MAX_T = 2.8f;        // 超时兜底（s）
+
+    // 长时未见 → 环扫
+    constexpr float SWEEP_ENTER_T = 2.0f;   // s
+    constexpr float SWEEP_OMEGA   = 0.35f;  // 环扫底盘角速度（rad/s）
+
+    // 常规边缘辅助
+    constexpr float BASE_HELP_EDGE = 40.0f; // 相机 yaw 接近边缘才带动底盘
+    constexpr float BASE_VYAW      = 0.25f; // 辅助角速度（rad/s）
+
+    // —— 底盘状态机（仅在函数内部保存）——
+    enum class Mode { Normal, BodyTurn, BaseSweep };
+    static bool inited = false;
+    static Mode mode = Mode::Normal;
+
+    static int seen_cnt = 0, lost_cnt = 0;
+    static float last_seen_yaw = 0.0f;
+    static Clock::time_point tp_last = Clock::now();
+    static Clock::time_point tp_seen = Clock::now();
+
+    // BodyTurn 控制量
+    static int   turn_dir = 0;                 // -1 左 / +1 右
+    static float turn_remain = 0.0f;
+    static Clock::time_point tp_turn_start = Clock::now();
+
+    // 环扫方向交替
+    static int sweep_dir = +1;
+
+    auto now = Clock::now();
+    if (!inited) { tp_last = now; tp_seen = now; inited = true; }
+
+    // —— 去抖统计（先做，以便后面任意分支都可用）——
+    if (_interface->ballDetected) { seen_cnt++; lost_cnt = 0; }
+    else                           { lost_cnt++; seen_cnt = 0; }
+    bool ball_stable_seen = (seen_cnt >= SEEN_OK);
+    bool ball_stable_lost = (lost_cnt >= LOST_OK);
+
+    float dt = std::chrono::duration<float>(now - tp_last).count();
+    dt = std::clamp(dt, 0.0f, 0.05f);
+    tp_last = now;
+
+    // —— 原版：未见球则准备插补器；见球则复位并 SUCCESS —— 
     if (!_interface->ballDetected)
     {
         if (firstRun)
         {
-            initAngle << _interface->servoState->msg_.states()[0].q(), _interface->servoState->msg_.states()[1].q();
+            initAngle << _interface->servoState->msg_.states()[0].q(),
+                         _interface->servoState->msg_.states()[1].q();
 
-            Vec2f initAngle(
+            Vec2f initAngleVec(
                 _interface->servoState->msg_.states()[0].q(),
                 _interface->servoState->msg_.states()[1].q()
             );
 
-            interpolator.reset(initAngle);
-
+            interpolator.reset(initAngleVec);
             for (const auto& [target, duration] : predefinedPhases)
             {
                 interpolator.addPhase(target, duration);
@@ -54,21 +110,84 @@ BT::NodeStatus camFindBall::tick()
     }
     else
     {
+        // —— 看到了球：记录信息并复位搜索器，立刻成功返回 —— 
+        tp_seen = now;
+        last_seen_yaw = _interface->servoState->msg_.states()[0].q();
+        mode = Mode::Normal;
+        turn_dir = 0; turn_remain = 0.0f;
+
         firstRun = true;
         interpolator = MultiStageInterpolator();
+        _interface->locoClient.Move(0, 0, 0); // 停止底盘空转
         return BT::NodeStatus::SUCCESS;
     }
+
+    // —— 原版：相机角度由插补器产生 —— 
     interpolator.interpolate(targetAngle);
 
+    // 安全限幅（避免预设相位把舵机顶到死角）
+    targetAngle(0) = std::clamp(targetAngle(0), YAW_MIN, YAW_MAX);
+    targetAngle(1) = std::clamp(targetAngle(1), PIT_MIN, PIT_MAX);
+
     _interface->servoCmd->msg_.cmds()[0].mode() = 1;
-    _interface->servoCmd->msg_.cmds()[0].q() = targetAngle(0);
+    _interface->servoCmd->msg_.cmds()[0].q()    = targetAngle(0);
     _interface->servoCmd->msg_.cmds()[1].mode() = 1;
-    _interface->servoCmd->msg_.cmds()[1].q() = targetAngle(1);
+    _interface->servoCmd->msg_.cmds()[1].q()    = targetAngle(1);
     _interface->servoCmd->unlockAndPublish();
 
-    _interface->locoClient.Move(0, 0, 0.3);
+    // —— 新增：底盘角速度策略（不改变你的头部扫描轨迹）——
+    float vyaw = 0.0f;
+    float since_seen = std::chrono::duration<float>(now - tp_seen).count();
+
+    // 1) “突丢转身”触发：刚丢且上次看到 yaw 在边缘
+    if (since_seen < LOST_EDGE_WINDOW &&
+        std::fabs(last_seen_yaw) > EDGE_TRIG &&
+        mode != Mode::BodyTurn)
+    {
+        mode = Mode::BodyTurn;
+        turn_dir = (last_seen_yaw > 0.0f) ? +1 : -1;
+        turn_remain = BODY_TURN_ANGLE;
+        tp_turn_start = now;
+    }
+
+    // 2) 长时未见 → 环扫（只在非转身状态下进入）
+    if (mode != Mode::BodyTurn && since_seen > SWEEP_ENTER_T)
+    {
+        if (mode != Mode::BaseSweep) // 刚切入时换个方向
+            sweep_dir = (sweep_dir == +1) ? -1 : +1;
+        mode = Mode::BaseSweep;
+    }
+
+    // 按状态机输出底盘角速度
+    switch (mode)
+    {
+        case Mode::BodyTurn:
+        {
+            vyaw = turn_dir * BODY_TURN_SPEED;
+            turn_remain -= std::fabs(vyaw) * dt;
+            bool timeout = std::chrono::duration<float>(now - tp_turn_start).count() > BODY_TURN_MAX_T;
+            if (turn_remain <= 0.0f || timeout) mode = Mode::Normal; // 转完回正常
+            break;
+        }
+        case Mode::BaseSweep:
+        {
+            vyaw = sweep_dir * SWEEP_OMEGA;
+            break;
+        }
+        case Mode::Normal:
+        default:
+        {
+            // 仅当相机 yaw 接近边缘且“稳定丢失”时，给一点辅助转动
+            if (ball_stable_lost && std::fabs(targetAngle(0)) > BASE_HELP_EDGE)
+                vyaw = (targetAngle(0) > 0.0f) ? +BASE_VYAW : -BASE_VYAW;
+            break;
+        }
+    }
+
+    _interface->locoClient.Move(0, 0, vyaw);
     return BT::NodeStatus::SUCCESS;
 }
+
 
 
 BT::NodeStatus robotTrackPelvis::tick()

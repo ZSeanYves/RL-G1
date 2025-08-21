@@ -118,7 +118,7 @@ void Interface::lowStateHandle()
     }
 
     // ================= 球越界去抖 + 自动解锁 =================
-    const double FIELD_X = 4.5;     // 9m/2
+    const double FIELD_X = 0;     // 半场
     const double FIELD_Y = 3.0;     // 6m/2
     const double SAFE_MARGIN = 0.1;
     const int    OOB_HYST   = 10;

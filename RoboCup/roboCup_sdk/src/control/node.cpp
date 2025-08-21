@@ -84,24 +84,49 @@ BT::NodeStatus robotTrackPelvis::tick()
     }
     else
     {
-        double vx = _interface->ballPositionInPelvis(0);
-        double vy = _interface->ballPositionInPelvis(1);
+    const double yawErr = _interface->ballYawToPelvis;
 
-        const double linearFactorSlope = 3.0;     
-        const double linearFactorOffset = 3.0;     
-        double linearFactor = 1.0 / (1.0 + exp(
-            linearFactorSlope * (_interface->ball_range_selected * fabs(_interface->ballYawToPelvis)) - linearFactorOffset
-        ));
+    // —— 可调参数（根据稳定性微调）——
+    const double YAW_FAST_THRESH = 0.55;   // 超过这个误差先就地快转（≈32°）
+    const double YAW_MAX         = 1.2;    // 最大角速度（rad/s）
+    const double YAW_GAIN_FAST   = 2.2;    // 大误差时的角速度增益
+    const double YAW_GAIN_FINE   = 1.4;    // 小误差时的线性增益
+    const double YAW_MIN_SPIN    = 0.12;   // 保底角速度，避免“磨”
+    const double YAW_DEADBAND    = 0.05;   // 死区，接近齐平就不转
 
-        vx *= linearFactor;
-        vy *= linearFactor;
-        vx = saturation(vx, Vec2<double>(-0.8,1.0));
-        vy = saturation(vy, Vec2<double>(-0.8,1.0));
-        double vyaw = _interface->ballYawToPelvis;
-        vyaw = saturation(vyaw, Vec2<double>(-0.5,0.5));
-
-        _interface->locoClient.Move(vx, vy,vyaw);
+    // —— 先旋转后平移：大角度先对齐方向 ——
+    if (std::abs(yawErr) > YAW_FAST_THRESH) {
+        double vyaw = YAW_GAIN_FAST * yawErr;
+        vyaw = saturation(vyaw, Vec2<double>(-YAW_MAX, YAW_MAX));
+        _interface->locoClient.Move(0.0, 0.0, vyaw);
+        return BT::NodeStatus::SUCCESS;
     }
+
+    // —— 小角度：允许平移，但按 yaw 误差抑制线速度 ——
+    double vx = _interface->ballPositionInPelvis(0);
+    double vy = _interface->ballPositionInPelvis(1);
+
+    // yaw 误差越大，平移抑制越强（0.2~1.0）
+    double alignFactor = 1.0 - std::abs(yawErr) / YAW_FAST_THRESH;
+    alignFactor = std::clamp(alignFactor, 0.2, 1.0);
+    vx *= alignFactor;
+    vy *= alignFactor;
+
+    vx = saturation(vx, Vec2<double>(-1.0, 1.0));  // 适当放宽线速度上限
+    vy = saturation(vy, Vec2<double>(-1.0, 1.0));
+
+    // —— 更快的转向：线性+立方，带保底角速度 ——
+    double vyaw = 0.0;
+    if (std::abs(yawErr) >= YAW_DEADBAND) {
+        vyaw = YAW_GAIN_FINE * yawErr + 0.6 * yawErr * yawErr * yawErr;
+        const double sgn = (vyaw >= 0.0) ? 1.0 : -1.0;
+        vyaw = sgn * std::max(YAW_MIN_SPIN, std::abs(vyaw));
+        vyaw = saturation(vyaw, Vec2<double>(-YAW_MAX, YAW_MAX));
+    }
+
+    _interface->locoClient.Move(vx, vy, vyaw);
+    }
+
     return BT::NodeStatus::SUCCESS;
 }
 
